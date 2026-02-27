@@ -13,7 +13,7 @@ const io = new Server(server, { cors: { origin: "*" } });
 const rooms = new Map(); // roomId -> room
 const playerRoom = new Map(); // socketId -> roomId
 const SERVER_TICK_MS = 50;
-const GAME_STATE_EMIT_MS = 120;
+const GAME_STATE_EMIT_MS = 180;
 
 const DIFFICULTY_MULT = Object.freeze({
   easy: 0.7,
@@ -85,6 +85,9 @@ function initRoomGame(room) {
     phase1: {
       nextWolfId: 1,
       wolves: [],
+      quest: {
+        wolvesSlain: 0,
+      },
       lastEmitAt: 0,
     },
   };
@@ -95,9 +98,14 @@ function initRoomGame(room) {
 }
 
 function makeGamePublic(room) {
-  const wolves = room?.game?.phase1?.wolves || [];
+  const phase1 = room?.game?.phase1 || {};
+  const wolves = phase1.wolves || [];
+  const quest = phase1.quest || { wolvesSlain: 0 };
   return {
     phase1: {
+      quest: {
+        wolvesSlain: Math.max(0, Number(quest.wolvesSlain) || 0),
+      },
       wolves: wolves.map((w) => ({
         id: w.id,
         map: "silver",
@@ -372,10 +380,15 @@ io.on("connection", (socket) => {
       wolf.hp = 0;
       wolf.alive = false;
       killed = true;
+      room.game.phase1.quest.wolvesSlain = Math.max(
+        0,
+        Number(room.game.phase1.quest.wolvesSlain) || 0,
+      ) + 1;
       io.to(room.id).emit("wolf:slain", {
         roomId: room.id,
         wolfId: wolf.id,
         killerId: socket.id,
+        wolvesSlain: room.game.phase1.quest.wolvesSlain,
         x: wolf.x,
         y: wolf.y,
       });
