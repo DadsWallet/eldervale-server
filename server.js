@@ -29,6 +29,45 @@ const WOLF_LEASH = Object.freeze({
   maxY: 1080,
 });
 
+const BANDIT_LEASH = Object.freeze({
+  minX: 900,
+  maxX: 1760,
+  minY: 250,
+  maxY: 1380,
+});
+
+const DIRE_LEASH = Object.freeze({
+  minX: 1280,
+  maxX: 1860,
+  minY: 80,
+  maxY: 370,
+});
+
+const WARLORD_CAVE_LEASH = Object.freeze({
+  minX: 90,
+  maxX: 820,
+  minY: 90,
+  maxY: 570,
+});
+
+const QUEST_NUM_KEYS = Object.freeze([
+  "wolvesSlain",
+  "banditsSlain",
+]);
+
+const QUEST_BOOL_KEYS = Object.freeze([
+  "gotPelt",
+  "direDefeated",
+  "foundCrowbar",
+  "openedCave",
+  "caveCrestTaken",
+  "askedAboutDarkPrince",
+  "wizardGateOpened",
+  "gotCrest",
+  "crestTauntPlayed",
+  "warlordDefeated",
+]);
+
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
@@ -46,10 +85,99 @@ function roomPartySize(room) {
   return Math.max(1, Number(room?.players?.length) || 1);
 }
 
+function defaultQuestSync() {
+  return {
+    stage: 0,
+    wolvesSlain: 0,
+    gotPelt: false,
+    direDefeated: false,
+    banditsSlain: 0,
+    foundCrowbar: false,
+    openedCave: false,
+    caveCrestTaken: false,
+    askedAboutDarkPrince: false,
+    wizardGateOpened: false,
+    gotCrest: false,
+    crestTauntPlayed: false,
+    warlordDefeated: false,
+  };
+}
+
+function sanitizeQuestSync(raw) {
+  const base = defaultQuestSync();
+  const stage = Math.max(0, Number(raw?.stage) || 0);
+  const out = { ...base, stage };
+  for (const key of QUEST_NUM_KEYS) {
+    out[key] = Math.max(0, Number(raw?.[key]) || 0);
+  }
+  for (const key of QUEST_BOOL_KEYS) {
+    out[key] = !!raw?.[key];
+  }
+  return out;
+}
+
+function mergeQuestSync(target, incoming) {
+  if (!incoming || typeof incoming !== "object") return false;
+  let changed = false;
+
+  const nextStage = Math.max(0, Number(incoming.stage) || 0);
+  if (nextStage > target.stage) {
+    target.stage = nextStage;
+    changed = true;
+  }
+
+  for (const key of QUEST_NUM_KEYS) {
+    const next = Math.max(0, Number(incoming[key]) || 0);
+    if (next > target[key]) {
+      target[key] = next;
+      changed = true;
+    }
+  }
+
+  for (const key of QUEST_BOOL_KEYS) {
+    if (incoming[key] === true && !target[key]) {
+      target[key] = true;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function serializeEnemy(e) {
+  if (!e) return null;
+  return {
+    id: e.id,
+    map: e.map,
+    type: e.type,
+    name: e.name,
+    x: Number(e.x) || 0,
+    y: Number(e.y) || 0,
+    r: Number(e.r) || 15,
+    hp: Number(e.hp) || 0,
+    maxHp: Number(e.maxHp) || 1,
+    damage: Number(e.damage) || 1,
+    speed: Number(e.speed) || 90,
+    alive: e.alive !== false,
+    animT: Number(e.animT) || 0,
+  };
+}
+
+function makeRoomId() {
+  return `room_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function randomWolfPos() {
   return {
     x: 1000 + Math.random() * 780,
     y: 150 + Math.random() * 840,
+  };
+}
+
+function randomBanditPos() {
+  return {
+    x: 930 + Math.random() * 780,
+    y: 280 + Math.random() * 1000,
   };
 }
 
@@ -79,17 +207,96 @@ function createWolf(room, id) {
   };
 }
 
+function createBandit(room, id) {
+  const diff = roomDifficultyMult(room);
+  const party = roomPartySize(room);
+  const hp = Math.max(1, Math.round(96 * 1.5 * diff * party));
+  const damage = Math.max(1, Math.round(8 * 1.5 * diff));
+  const pos = randomBanditPos();
+  return {
+    id,
+    type: "bandit",
+    map: "iron",
+    name: `Bandit #${id}`,
+    x: pos.x,
+    y: pos.y,
+    r: 16,
+    hp,
+    maxHp: hp,
+    damage,
+    speed: 110,
+    hitCd: 0,
+    windup: 0,
+    alive: true,
+    animT: Math.random() * 10,
+    wanderA: Math.random() * Math.PI * 2,
+  };
+}
+
+function createDireWolf(room) {
+  const diff = roomDifficultyMult(room);
+  const party = roomPartySize(room);
+  const hp = Math.max(1, Math.round(360 * 1.5 * diff * party));
+  const damage = Math.max(1, Math.round(12 * 1.5 * diff));
+  return {
+    id: "dire_alpha",
+    type: "dire",
+    map: "silver",
+    name: "Dire Wolf",
+    x: 1560,
+    y: 200,
+    r: 23,
+    hp,
+    maxHp: hp,
+    damage,
+    speed: 126,
+    hitCd: 0,
+    windup: 0,
+    alive: true,
+    animT: 0,
+    wanderA: Math.random() * Math.PI * 2,
+  };
+}
+
+function createWarlord(room) {
+  const diff = roomDifficultyMult(room);
+  const party = roomPartySize(room);
+  const hp = Math.max(1, Math.round(480 * 1.5 * diff * party));
+  const damage = Math.max(1, Math.round(16 * 1.5 * diff));
+  return {
+    id: "warlord_overseer",
+    type: "warlord",
+    map: "cave",
+    name: "Bandit Warlord",
+    x: 690,
+    y: 230,
+    r: 24,
+    hp,
+    maxHp: hp,
+    damage,
+    speed: 118,
+    hitCd: 0,
+    windup: 0,
+    alive: true,
+    animT: 0,
+    wanderA: Math.random() * Math.PI * 2,
+  };
+}
+
 function initRoomGame(room) {
   if (room.game) return;
   room.game = {
+    questSync: defaultQuestSync(),
     phase1: {
       nextWolfId: 1,
       wolves: [],
-      quest: {
-        wolvesSlain: 0,
-        gotPelt: false,
-      },
       lastEmitAt: 0,
+    },
+    phase2: {
+      nextBanditId: 1,
+      bandits: [],
+      direWolf: null,
+      warlord: null,
     },
   };
   for (let i = 0; i < 10; i += 1) {
@@ -98,31 +305,60 @@ function initRoomGame(room) {
   }
 }
 
+function ensurePhase2Spawns(room) {
+  if (!room?.game) return;
+  const q = room.game.questSync;
+  const phase2 = room.game.phase2;
+
+  if (q.stage >= 10 && phase2.bandits.length === 0) {
+    for (let i = 0; i < 10; i += 1) {
+      phase2.bandits.push(createBandit(room, phase2.nextBanditId));
+      phase2.nextBanditId += 1;
+    }
+  }
+
+  if (q.stage >= 6 && !q.direDefeated && (!phase2.direWolf || phase2.direWolf.alive === false)) {
+    phase2.direWolf = createDireWolf(room);
+  }
+  if (q.direDefeated) {
+    phase2.direWolf = null;
+  }
+
+  if (q.stage >= 14 && !q.warlordDefeated && (!phase2.warlord || phase2.warlord.alive === false)) {
+    phase2.warlord = createWarlord(room);
+  }
+  if (q.warlordDefeated) {
+    phase2.warlord = null;
+  }
+}
+
 function makeGamePublic(room) {
   const phase1 = room?.game?.phase1 || {};
-  const wolves = phase1.wolves || [];
-  const quest = phase1.quest || { wolvesSlain: 0, gotPelt: false };
+  const phase2 = room?.game?.phase2 || {};
+  const questSync = sanitizeQuestSync(room?.game?.questSync || {});
+  const wolves = Array.isArray(phase1.wolves) ? phase1.wolves : [];
+  const bandits = Array.isArray(phase2.bandits) ? phase2.bandits : [];
+  const direWolf = phase2.direWolf || null;
+  const warlord = phase2.warlord || null;
+
   return {
+    quest: questSync,
     phase1: {
       quest: {
-        wolvesSlain: Math.max(0, Number(quest.wolvesSlain) || 0),
-        gotPelt: !!quest.gotPelt,
+        wolvesSlain: questSync.wolvesSlain,
+        gotPelt: questSync.gotPelt,
       },
-      wolves: wolves.map((w) => ({
-        id: w.id,
-        map: "silver",
-        type: "wolf",
-        name: w.name,
-        x: Number(w.x) || 0,
-        y: Number(w.y) || 0,
-        r: Number(w.r) || 15,
-        hp: Number(w.hp) || 0,
-        maxHp: Number(w.maxHp) || 1,
-        damage: Number(w.damage) || 1,
-        speed: Number(w.speed) || 90,
-        alive: w.alive !== false,
-        animT: Number(w.animT) || 0,
-      })),
+      wolves: wolves.map((w) => serializeEnemy(w)),
+    },
+    phase2: {
+      quest: {
+        banditsSlain: questSync.banditsSlain,
+        direDefeated: questSync.direDefeated,
+        warlordDefeated: questSync.warlordDefeated,
+      },
+      bandits: bandits.map((b) => serializeEnemy(b)),
+      direWolf: serializeEnemy(direWolf),
+      warlord: serializeEnemy(warlord),
     },
   };
 }
@@ -133,6 +369,15 @@ function emitGameState(roomId) {
   io.to(roomId).emit("game:state", {
     roomId,
     state: makeGamePublic(room),
+  });
+}
+
+function emitQuestSync(roomId) {
+  const room = rooms.get(roomId);
+  if (!room?.game) return;
+  io.to(roomId).emit("quest:sync", {
+    roomId,
+    quest: sanitizeQuestSync(room.game.questSync),
   });
 }
 
@@ -160,69 +405,113 @@ function emitRoomUpdate(roomId) {
   io.to(roomId).emit("room:update", makeRoomPublic(room));
 }
 
-function makeRoomId() {
-  return `room_${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function activeSilverPlayers(room) {
+function activePlayersOnMap(room, mapId) {
   return room.players.filter(
-    (p) =>
-      p?.state?.map === "silver" &&
-      Number.isFinite(p.state.x) &&
-      Number.isFinite(p.state.y),
+    (p) => p?.state?.map === mapId && Number.isFinite(p.state.x) && Number.isFinite(p.state.y),
   );
 }
 
-function updateRoomWolves(room, dt) {
-  const wolves = room?.game?.phase1?.wolves;
-  if (!wolves) return;
+function updateEnemyAI(enemy, players, dt, leash) {
+  if (!enemy?.alive) return;
 
-  const players = activeSilverPlayers(room);
+  enemy.animT += dt * 8;
+  enemy.hitCd = Math.max(0, enemy.hitCd - dt);
 
-  for (const wolf of wolves) {
-    if (!wolf.alive) continue;
-    wolf.animT += dt * 8;
-    wolf.hitCd = Math.max(0, wolf.hitCd - dt);
+  if (enemy.windup > 0) {
+    enemy.windup -= dt;
+    if (enemy.windup <= 0) enemy.hitCd = enemy.type === "warlord" ? 0.9 : 1.05;
+    return;
+  }
 
-    if (wolf.windup > 0) {
-      wolf.windup -= dt;
-      if (wolf.windup <= 0) wolf.hitCd = 1.05;
-      continue;
+  let target = null;
+  let targetDist = Infinity;
+  for (const player of players) {
+    const d = dist(enemy, player.state);
+    if (d < targetDist) {
+      targetDist = d;
+      target = player.state;
     }
+  }
 
-    let target = null;
-    let targetDist = Infinity;
-    for (const player of players) {
-      const d = dist(wolf, player.state);
-      if (d < targetDist) {
-        targetDist = d;
-        target = player.state;
+  if (target && targetDist < 245) {
+    const vx = (target.x - enemy.x) / (targetDist || 1);
+    const vy = (target.y - enemy.y) / (targetDist || 1);
+    enemy.x += vx * enemy.speed * dt;
+    enemy.y += vy * enemy.speed * dt;
+
+    if (targetDist < enemy.r + 14 + 14 && enemy.hitCd <= 0) {
+      enemy.windup = enemy.type === "warlord" ? 0.48 : enemy.type === "dire" ? 0.42 : 0.34;
+    }
+  } else {
+    enemy.wanderA += (Math.random() - 0.5) * dt;
+    enemy.x += Math.cos(enemy.wanderA) * 38 * dt;
+    enemy.y += Math.sin(enemy.wanderA) * 38 * dt;
+  }
+
+  enemy.x = clamp(enemy.x, leash.minX, leash.maxX);
+  enemy.y = clamp(enemy.y, leash.minY, leash.maxY);
+}
+
+function updateRoomEnemies(room, dt) {
+  const game = room.game;
+  if (!game) return;
+
+  ensurePhase2Spawns(room);
+
+  const wolves = game.phase1.wolves;
+  const silverPlayers = activePlayersOnMap(room, "silver");
+  for (const wolf of wolves) updateEnemyAI(wolf, silverPlayers, dt, WOLF_LEASH);
+
+  const aliveWolves = wolves.filter((w) => w.alive).length;
+  if (aliveWolves < 5) {
+    for (let i = 0; i < 3; i += 1) {
+      wolves.push(createWolf(room, game.phase1.nextWolfId));
+      game.phase1.nextWolfId += 1;
+    }
+  }
+
+  const q = game.questSync;
+  const phase2 = game.phase2;
+
+  if (q.stage >= 10) {
+    const ironPlayers = activePlayersOnMap(room, "iron");
+    for (const bandit of phase2.bandits) updateEnemyAI(bandit, ironPlayers, dt, BANDIT_LEASH);
+    const aliveBandits = phase2.bandits.filter((b) => b.alive).length;
+    if (aliveBandits < 5) {
+      for (let i = 0; i < 4; i += 1) {
+        phase2.bandits.push(createBandit(room, phase2.nextBanditId));
+        phase2.nextBanditId += 1;
       }
     }
-
-    if (target && targetDist < 245) {
-      const vx = (target.x - wolf.x) / (targetDist || 1);
-      const vy = (target.y - wolf.y) / (targetDist || 1);
-      wolf.x += vx * wolf.speed * dt;
-      wolf.y += vy * wolf.speed * dt;
-      if (targetDist < wolf.r + 14 + 14 && wolf.hitCd <= 0) wolf.windup = 0.34;
-    } else {
-      wolf.wanderA += (Math.random() - 0.5) * dt;
-      wolf.x += Math.cos(wolf.wanderA) * 38 * dt;
-      wolf.y += Math.sin(wolf.wanderA) * 38 * dt;
-    }
-
-    wolf.x = clamp(wolf.x, WOLF_LEASH.minX, WOLF_LEASH.maxX);
-    wolf.y = clamp(wolf.y, WOLF_LEASH.minY, WOLF_LEASH.maxY);
   }
 
-  const aliveCount = wolves.filter((w) => w.alive).length;
-  if (aliveCount < 5) {
-    for (let i = 0; i < 3; i += 1) {
-      wolves.push(createWolf(room, room.game.phase1.nextWolfId));
-      room.game.phase1.nextWolfId += 1;
-    }
+  if (phase2.direWolf && !q.direDefeated) {
+    updateEnemyAI(phase2.direWolf, silverPlayers, dt, DIRE_LEASH);
   }
+
+  if (phase2.warlord && !q.warlordDefeated) {
+    const cavePlayers = activePlayersOnMap(room, "cave");
+    updateEnemyAI(phase2.warlord, cavePlayers, dt, WARLORD_CAVE_LEASH);
+  }
+}
+
+function withinMeleeRange(playerState, enemy, isHeavy) {
+  const range = isHeavy ? 96 : 68;
+  const dx = playerState.x - enemy.x;
+  const dy = playerState.y - enemy.y;
+  const maxDist = range + enemy.r + 20;
+  return dx * dx + dy * dy <= maxDist * maxDist;
+}
+
+function applyEnemyDamage(enemy, amount) {
+  const dmg = clamp(Math.round(Number(amount) || 0), 1, 999);
+  enemy.hp -= dmg;
+  if (enemy.hp <= 0) {
+    enemy.hp = 0;
+    enemy.alive = false;
+    return true;
+  }
+  return false;
 }
 
 let lastTickAt = Date.now();
@@ -233,11 +522,10 @@ setInterval(() => {
 
   for (const room of rooms.values()) {
     if (!room.started || !room.game) continue;
-    updateRoomWolves(room, dt);
+    updateRoomEnemies(room, dt);
 
-    const phase1 = room.game.phase1;
-    if (now - phase1.lastEmitAt >= GAME_STATE_EMIT_MS) {
-      phase1.lastEmitAt = now;
+    if (now - room.game.phase1.lastEmitAt >= GAME_STATE_EMIT_MS) {
+      room.game.phase1.lastEmitAt = now;
       emitGameState(room.id);
     }
   }
@@ -327,6 +615,7 @@ io.on("connection", (socket) => {
         playerCount: room.players.length,
       });
       emitRoomUpdate(room.id);
+      emitQuestSync(room.id);
       emitGameState(room.id);
     }
   });
@@ -342,7 +631,7 @@ io.on("connection", (socket) => {
     socket.to(room.id).emit("player:state", { id: socket.id, state: player.state });
   });
 
-  socket.on("wolf:hit", (payload, ack) => {
+  socket.on("quest:sync", (payload, ack) => {
     const roomId = payload?.roomId || playerRoom.get(socket.id);
     const room = rooms.get(roomId);
     if (!room || !room.started) {
@@ -351,54 +640,20 @@ io.on("connection", (socket) => {
     }
 
     initRoomGame(room);
-    const wolves = room.game.phase1.wolves;
-    const player = room.players.find((p) => p.id === socket.id);
-    if (!player?.state || player.state.map !== "silver") {
-      ack?.({ ok: false, error: "Player not in Silver Keep" });
-      return;
+    const incoming = {
+      stage: Number(payload?.stage) || 0,
+      ...(payload?.quest || {}),
+    };
+    const changed = mergeQuestSync(room.game.questSync, incoming);
+
+    ensurePhase2Spawns(room);
+
+    if (changed) {
+      emitQuestSync(room.id);
+      emitGameState(room.id);
     }
 
-    const wolfId = Number(payload?.wolfId);
-    const wolf = wolves.find((w) => w.id === wolfId && w.alive);
-    if (!wolf) {
-      ack?.({ ok: false, error: "Wolf not found" });
-      return;
-    }
-
-    const isHeavy = !!payload?.heavy;
-    const range = isHeavy ? 96 : 68;
-    const dx = player.state.x - wolf.x;
-    const dy = player.state.y - wolf.y;
-    const maxDist = range + wolf.r + 20;
-    if (dx * dx + dy * dy > maxDist * maxDist) {
-      ack?.({ ok: false, error: "Out of range" });
-      return;
-    }
-
-    const damage = clamp(Math.round(Number(payload?.damage) || 0), 1, 999);
-    wolf.hp -= damage;
-    let killed = false;
-    if (wolf.hp <= 0) {
-      wolf.hp = 0;
-      wolf.alive = false;
-      killed = true;
-      room.game.phase1.quest.wolvesSlain = Math.max(
-        0,
-        Number(room.game.phase1.quest.wolvesSlain) || 0,
-      ) + 1;
-      io.to(room.id).emit("wolf:slain", {
-        roomId: room.id,
-        wolfId: wolf.id,
-        killerId: socket.id,
-        wolvesSlain: room.game.phase1.quest.wolvesSlain,
-        gotPelt: !!room.game.phase1.quest.gotPelt,
-        x: wolf.x,
-        y: wolf.y,
-      });
-    }
-
-    emitGameState(room.id);
-    ack?.({ ok: true, killed, hp: wolf.hp });
+    ack?.({ ok: true, quest: sanitizeQuestSync(room.game.questSync) });
   });
 
   socket.on("quest:phase1:update", (payload, ack) => {
@@ -410,32 +665,149 @@ io.on("connection", (socket) => {
     }
 
     initRoomGame(room);
-    const quest = room.game.phase1.quest;
-    let changed = false;
-
-    if (payload?.gotPelt === true && !quest.gotPelt) {
-      quest.gotPelt = true;
-      changed = true;
-    }
+    const changed = mergeQuestSync(room.game.questSync, {
+      gotPelt: payload?.gotPelt === true,
+    });
 
     if (changed) {
       io.to(room.id).emit("quest:phase1:update", {
         roomId: room.id,
         quest: {
-          wolvesSlain: Math.max(0, Number(quest.wolvesSlain) || 0),
-          gotPelt: !!quest.gotPelt,
+          wolvesSlain: room.game.questSync.wolvesSlain,
+          gotPelt: room.game.questSync.gotPelt,
         },
       });
+      emitQuestSync(room.id);
       emitGameState(room.id);
     }
 
     ack?.({
       ok: true,
       quest: {
-        wolvesSlain: Math.max(0, Number(quest.wolvesSlain) || 0),
-        gotPelt: !!quest.gotPelt,
+        wolvesSlain: room.game.questSync.wolvesSlain,
+        gotPelt: room.game.questSync.gotPelt,
       },
     });
+  });
+
+  socket.on("wolf:hit", (payload, ack) => {
+    const roomId = payload?.roomId || playerRoom.get(socket.id);
+    const room = rooms.get(roomId);
+    if (!room || !room.started) {
+      ack?.({ ok: false, error: "Room not active" });
+      return;
+    }
+
+    initRoomGame(room);
+    const player = room.players.find((p) => p.id === socket.id);
+    if (!player?.state || player.state.map !== "silver") {
+      ack?.({ ok: false, error: "Player not in Silver Keep" });
+      return;
+    }
+
+    const wolfId = Number(payload?.wolfId);
+    const wolf = room.game.phase1.wolves.find((w) => w.id === wolfId && w.alive);
+    if (!wolf) {
+      ack?.({ ok: false, error: "Wolf not found" });
+      return;
+    }
+
+    const isHeavy = !!payload?.heavy;
+    if (!withinMeleeRange(player.state, wolf, isHeavy)) {
+      ack?.({ ok: false, error: "Out of range" });
+      return;
+    }
+
+    const killed = applyEnemyDamage(wolf, payload?.damage);
+    if (killed) {
+      room.game.questSync.wolvesSlain += 1;
+      io.to(room.id).emit("wolf:slain", {
+        roomId: room.id,
+        wolfId: wolf.id,
+        killerId: socket.id,
+        wolvesSlain: room.game.questSync.wolvesSlain,
+        gotPelt: room.game.questSync.gotPelt,
+        x: wolf.x,
+        y: wolf.y,
+      });
+      emitQuestSync(room.id);
+    }
+
+    emitGameState(room.id);
+    ack?.({ ok: true, killed, hp: wolf.hp });
+  });
+
+  socket.on("enemy:hit", (payload, ack) => {
+    const roomId = payload?.roomId || playerRoom.get(socket.id);
+    const room = rooms.get(roomId);
+    if (!room || !room.started) {
+      ack?.({ ok: false, error: "Room not active" });
+      return;
+    }
+
+    initRoomGame(room);
+    const player = room.players.find((p) => p.id === socket.id);
+    if (!player?.state) {
+      ack?.({ ok: false, error: "Missing player state" });
+      return;
+    }
+
+    const enemyType = String(payload?.enemyType || "");
+    const enemyId = payload?.enemyId;
+    let enemy = null;
+
+    if (enemyType === "bandit") {
+      const banditId = Number(enemyId);
+      enemy = room.game.phase2.bandits.find((b) => b.id === banditId && b.alive);
+    } else if (enemyType === "dire") {
+      enemy = room.game.phase2.direWolf && room.game.phase2.direWolf.alive ? room.game.phase2.direWolf : null;
+    } else if (enemyType === "warlord") {
+      enemy = room.game.phase2.warlord && room.game.phase2.warlord.alive ? room.game.phase2.warlord : null;
+    }
+
+    if (!enemy) {
+      ack?.({ ok: false, error: "Enemy not found" });
+      return;
+    }
+
+    if (player.state.map !== enemy.map) {
+      ack?.({ ok: false, error: "Wrong map" });
+      return;
+    }
+
+    const isHeavy = !!payload?.heavy;
+    if (!withinMeleeRange(player.state, enemy, isHeavy)) {
+      ack?.({ ok: false, error: "Out of range" });
+      return;
+    }
+
+    const killed = applyEnemyDamage(enemy, payload?.damage);
+
+    if (killed) {
+      if (enemy.type === "bandit") {
+        room.game.questSync.banditsSlain += 1;
+      } else if (enemy.type === "dire") {
+        room.game.questSync.direDefeated = true;
+        room.game.phase2.direWolf = null;
+      } else if (enemy.type === "warlord") {
+        room.game.questSync.warlordDefeated = true;
+        room.game.phase2.warlord = null;
+      }
+
+      io.to(room.id).emit("enemy:slain", {
+        roomId: room.id,
+        enemyType: enemy.type,
+        enemyId: enemy.id,
+        killerId: socket.id,
+        x: enemy.x,
+        y: enemy.y,
+        quest: sanitizeQuestSync(room.game.questSync),
+      });
+      emitQuestSync(room.id);
+    }
+
+    emitGameState(room.id);
+    ack?.({ ok: true, killed, hp: enemy.hp });
   });
 
   socket.on("disconnect", () => {
