@@ -87,6 +87,7 @@ function initRoomGame(room) {
       wolves: [],
       quest: {
         wolvesSlain: 0,
+        gotPelt: false,
       },
       lastEmitAt: 0,
     },
@@ -100,11 +101,12 @@ function initRoomGame(room) {
 function makeGamePublic(room) {
   const phase1 = room?.game?.phase1 || {};
   const wolves = phase1.wolves || [];
-  const quest = phase1.quest || { wolvesSlain: 0 };
+  const quest = phase1.quest || { wolvesSlain: 0, gotPelt: false };
   return {
     phase1: {
       quest: {
         wolvesSlain: Math.max(0, Number(quest.wolvesSlain) || 0),
+        gotPelt: !!quest.gotPelt,
       },
       wolves: wolves.map((w) => ({
         id: w.id,
@@ -389,6 +391,7 @@ io.on("connection", (socket) => {
         wolfId: wolf.id,
         killerId: socket.id,
         wolvesSlain: room.game.phase1.quest.wolvesSlain,
+        gotPelt: !!room.game.phase1.quest.gotPelt,
         x: wolf.x,
         y: wolf.y,
       });
@@ -396,6 +399,43 @@ io.on("connection", (socket) => {
 
     emitGameState(room.id);
     ack?.({ ok: true, killed, hp: wolf.hp });
+  });
+
+  socket.on("quest:phase1:update", (payload, ack) => {
+    const roomId = payload?.roomId || playerRoom.get(socket.id);
+    const room = rooms.get(roomId);
+    if (!room || !room.started) {
+      ack?.({ ok: false, error: "Room not active" });
+      return;
+    }
+
+    initRoomGame(room);
+    const quest = room.game.phase1.quest;
+    let changed = false;
+
+    if (payload?.gotPelt === true && !quest.gotPelt) {
+      quest.gotPelt = true;
+      changed = true;
+    }
+
+    if (changed) {
+      io.to(room.id).emit("quest:phase1:update", {
+        roomId: room.id,
+        quest: {
+          wolvesSlain: Math.max(0, Number(quest.wolvesSlain) || 0),
+          gotPelt: !!quest.gotPelt,
+        },
+      });
+      emitGameState(room.id);
+    }
+
+    ack?.({
+      ok: true,
+      quest: {
+        wolvesSlain: Math.max(0, Number(quest.wolvesSlain) || 0),
+        gotPelt: !!quest.gotPelt,
+      },
+    });
   });
 
   socket.on("disconnect", () => {
