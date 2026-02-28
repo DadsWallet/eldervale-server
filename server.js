@@ -66,6 +66,12 @@ const QUEST_BOOL_KEYS = Object.freeze([
   "gotCrest",
   "crestTauntPlayed",
   "warlordDefeated",
+  "finalWaveKeyTaken",
+  "finalMazeKeyTaken",
+  "finalFangPlaced",
+  "finalSignetPlaced",
+  "finalMiniDefeated",
+  "finalDarkDefeated",
 ]);
 
 function clamp(v, min, max) {
@@ -100,6 +106,12 @@ function defaultQuestSync() {
     gotCrest: false,
     crestTauntPlayed: false,
     warlordDefeated: false,
+    finalWaveKeyTaken: false,
+    finalMazeKeyTaken: false,
+    finalFangPlaced: false,
+    finalSignetPlaced: false,
+    finalMiniDefeated: false,
+    finalDarkDefeated: false,
   };
 }
 
