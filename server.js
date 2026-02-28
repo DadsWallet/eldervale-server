@@ -101,6 +101,20 @@ function connectedPlayers(room) {
   return room.players.filter((p) => p && p.connected !== false);
 }
 
+function ensureRoomLeader(room) {
+  if (!room || !Array.isArray(room.players)) return null;
+  const active = room.players.filter((p) => p && p.connected !== false);
+  if (active.length === 0) return null;
+
+  let leader = active.find((p) => p.leader === true);
+  if (!leader) leader = active[0];
+
+  for (const p of room.players) {
+    p.leader = p.connected !== false && p.id === leader.id;
+  }
+  return leader;
+}
+
 function normalizeClientId(raw, socketId) {
   const value = String(raw || "").trim().slice(0, 96);
   if (value) return value;
@@ -364,6 +378,7 @@ function ensurePhase2Spawns(room) {
 }
 
 function makeGamePublic(room) {
+  const leader = roomLeader(room);
   const phase1 = room?.game?.phase1 || {};
   const phase2 = room?.game?.phase2 || {};
   const questSync = sanitizeQuestSync(room?.game?.questSync || {});
@@ -373,6 +388,7 @@ function makeGamePublic(room) {
   const warlord = phase2.warlord || null;
 
   return {
+    leaderId: leader ? leader.id : null,
     quest: questSync,
     phase1: {
       quest: {
@@ -413,6 +429,7 @@ function emitQuestSync(roomId) {
 }
 
 function makeRoomPublic(room) {
+  const leader = roomLeader(room);
   const players = connectedPlayers(room);
   return {
     id: room.id,
@@ -420,6 +437,7 @@ function makeRoomPublic(room) {
     difficulty: room.difficulty,
     maxPlayers: room.maxPlayers,
     started: room.started,
+    leaderId: leader ? leader.id : null,
     players: players.map((p) => ({
       id: p.id,
       name: p.name,
@@ -444,8 +462,7 @@ function activePlayersOnMap(room, mapId) {
 }
 
 function roomLeader(room) {
-  const active = connectedPlayers(room);
-  return active.find((p) => p.leader) || active[0] || null;
+  return ensureRoomLeader(room);
 }
 
 function updateEnemyAI(enemy, players, dt, leash) {
@@ -561,10 +578,7 @@ function pruneRoomStaleMembers(room, now = Date.now()) {
     return now - disconnectedAt <= PLAYER_RECONNECT_GRACE_MS;
   });
 
-  if (room.players.length > 0 && !room.players.some((p) => p.leader && p.connected !== false)) {
-    const firstConnected = room.players.find((p) => p.connected !== false);
-    if (firstConnected) firstConnected.leader = true;
-  }
+  ensureRoomLeader(room);
 }
 
 let lastTickAt = Date.now();
@@ -677,6 +691,7 @@ io.on("connection", (socket) => {
     playerRoom.set(socket.id, room.id);
     room.emptySince = 0;
     socket.join(room.id);
+    ensureRoomLeader(room);
     ack?.({ ok: true, room: makeRoomPublic(room) });
     emitRoomUpdate(room.id);
     if (room.started) {
@@ -710,6 +725,7 @@ io.on("connection", (socket) => {
     playerRoom.set(socket.id, room.id);
     room.emptySince = 0;
     socket.join(room.id);
+    ensureRoomLeader(room);
 
     ack?.({
       ok: true,
@@ -737,6 +753,7 @@ io.on("connection", (socket) => {
 
     player.ready = !!payload.ready;
     if (payload.name) player.name = String(payload.name).slice(0, 20);
+    ensureRoomLeader(room);
 
     emitRoomUpdate(room.id);
 
@@ -958,6 +975,7 @@ io.on("connection", (socket) => {
 
     io.to(room.id).emit("wave:state", {
       roomId: room.id,
+      leaderId: leader.id,
       state: payload?.state || null,
     });
   });
@@ -1008,16 +1026,14 @@ io.on("connection", (socket) => {
         rooms.delete(roomId);
         return;
       }
-      if (!room.players.some((p) => p.leader)) {
-        const firstConnected = room.players.find((p) => p.connected !== false) || room.players[0];
-        if (firstConnected) firstConnected.leader = true;
-      }
+      ensureRoomLeader(room);
       emitRoomUpdate(roomId);
       return;
     }
 
     player.connected = false;
     player.disconnectedAt = Date.now();
+    ensureRoomLeader(room);
     if (connectedPlayers(room).length === 0) room.emptySince = Date.now();
     emitRoomUpdate(roomId);
   });
