@@ -443,6 +443,11 @@ function activePlayersOnMap(room, mapId) {
   );
 }
 
+function roomLeader(room) {
+  const active = connectedPlayers(room);
+  return active.find((p) => p.leader) || active[0] || null;
+}
+
 function updateEnemyAI(enemy, players, dt, leash) {
   if (!enemy?.alive) return;
 
@@ -941,6 +946,49 @@ io.on("connection", (socket) => {
 
     emitGameState(room.id);
     ack?.({ ok: true, killed, hp: enemy.hp });
+  });
+
+  socket.on("wave:state", (payload) => {
+    const roomId = payload?.roomId || playerRoom.get(socket.id);
+    const room = rooms.get(roomId);
+    if (!room || !room.started) return;
+
+    const leader = roomLeader(room);
+    if (!leader || leader.id !== socket.id) return;
+
+    io.to(room.id).emit("wave:state", {
+      roomId: room.id,
+      state: payload?.state || null,
+    });
+  });
+
+  socket.on("wave:hit", (payload, ack) => {
+    const roomId = payload?.roomId || playerRoom.get(socket.id);
+    const room = rooms.get(roomId);
+    if (!room || !room.started) {
+      ack?.({ ok: false, error: "Room not active" });
+      return;
+    }
+
+    const leader = roomLeader(room);
+    if (!leader) {
+      ack?.({ ok: false, error: "Leader not found" });
+      return;
+    }
+
+    if (leader.id === socket.id) {
+      ack?.({ ok: false, error: "Leader should resolve locally" });
+      return;
+    }
+
+    io.to(leader.id).emit("wave:hit", {
+      roomId: room.id,
+      enemyId: payload?.enemyId,
+      damage: payload?.damage,
+      heavy: !!payload?.heavy,
+      fromId: socket.id,
+    });
+    ack?.({ ok: true });
   });
 
   socket.on("disconnect", () => {
