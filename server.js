@@ -14,6 +14,8 @@ const rooms = new Map(); // roomId -> room
 const playerRoom = new Map(); // socketId -> roomId
 const SERVER_TICK_MS = 50;
 const GAME_STATE_EMIT_MS = 180;
+const PLAYER_RECONNECT_GRACE_MS = 3 * 60 * 1000;
+const EMPTY_STARTED_ROOM_GRACE_MS = 8 * 60 * 1000;
 
 const DIFFICULTY_MULT = Object.freeze({
   easy: 0.7,
@@ -53,6 +55,7 @@ const WARLORD_CAVE_LEASH = Object.freeze({
 const QUEST_NUM_KEYS = Object.freeze([
   "wolvesSlain",
   "banditsSlain",
+  "finalWaveTotalKills",
 ]);
 
 const QUEST_BOOL_KEYS = Object.freeze([
@@ -66,10 +69,12 @@ const QUEST_BOOL_KEYS = Object.freeze([
   "gotCrest",
   "crestTauntPlayed",
   "warlordDefeated",
+  "finalWaveStarted",
   "finalWaveKeyTaken",
   "finalMazeKeyTaken",
   "finalFangPlaced",
   "finalSignetPlaced",
+  "finalMiniTriggered",
   "finalMiniDefeated",
   "finalDarkDefeated",
 ]);
@@ -88,7 +93,18 @@ function roomDifficultyMult(room) {
 }
 
 function roomPartySize(room) {
-  return Math.max(1, Number(room?.players?.length) || 1);
+  return Math.max(1, connectedPlayers(room).length || 1);
+}
+
+function connectedPlayers(room) {
+  if (!room || !Array.isArray(room.players)) return [];
+  return room.players.filter((p) => p && p.connected !== false);
+}
+
+function normalizeClientId(raw, socketId) {
+  const value = String(raw || "").trim().slice(0, 96);
+  if (value) return value;
+  return `sock_${String(socketId || "").slice(0, 24)}`;
 }
 
 function defaultQuestSync() {
@@ -106,10 +122,13 @@ function defaultQuestSync() {
     gotCrest: false,
     crestTauntPlayed: false,
     warlordDefeated: false,
+    finalWaveStarted: false,
+    finalWaveTotalKills: 0,
     finalWaveKeyTaken: false,
     finalMazeKeyTaken: false,
     finalFangPlaced: false,
     finalSignetPlaced: false,
+    finalMiniTriggered: false,
     finalMiniDefeated: false,
     finalDarkDefeated: false,
   };
@@ -394,13 +413,14 @@ function emitQuestSync(roomId) {
 }
 
 function makeRoomPublic(room) {
+  const players = connectedPlayers(room);
   return {
     id: room.id,
     name: room.name,
     difficulty: room.difficulty,
     maxPlayers: room.maxPlayers,
     started: room.started,
-    players: room.players.map((p) => ({
+    players: players.map((p) => ({
       id: p.id,
       name: p.name,
       ready: p.ready,
@@ -418,7 +438,7 @@ function emitRoomUpdate(roomId) {
 }
 
 function activePlayersOnMap(room, mapId) {
-  return room.players.filter(
+  return connectedPlayers(room).filter(
     (p) => p?.state?.map === mapId && Number.isFinite(p.state.x) && Number.isFinite(p.state.y),
   );
 }
@@ -526,19 +546,52 @@ function applyEnemyDamage(enemy, amount) {
   return false;
 }
 
+function pruneRoomStaleMembers(room, now = Date.now()) {
+  if (!room || !Array.isArray(room.players)) return;
+
+  room.players = room.players.filter((p) => {
+    if (!p) return false;
+    if (p.connected !== false) return true;
+    const disconnectedAt = Number(p.disconnectedAt) || 0;
+    return now - disconnectedAt <= PLAYER_RECONNECT_GRACE_MS;
+  });
+
+  if (room.players.length > 0 && !room.players.some((p) => p.leader && p.connected !== false)) {
+    const firstConnected = room.players.find((p) => p.connected !== false);
+    if (firstConnected) firstConnected.leader = true;
+  }
+}
+
 let lastTickAt = Date.now();
 setInterval(() => {
   const now = Date.now();
   const dt = Math.min((now - lastTickAt) / 1000, 0.2);
   lastTickAt = now;
 
-  for (const room of rooms.values()) {
+  for (const [roomId, room] of rooms.entries()) {
+    pruneRoomStaleMembers(room, now);
+
+    if (room.players.length === 0) {
+      rooms.delete(roomId);
+      continue;
+    }
+
+    if (room.started && connectedPlayers(room).length === 0) {
+      room.emptySince = room.emptySince || now;
+      if (now - room.emptySince > EMPTY_STARTED_ROOM_GRACE_MS) {
+        rooms.delete(roomId);
+        continue;
+      }
+    } else {
+      room.emptySince = 0;
+    }
+
     if (!room.started || !room.game) continue;
     updateRoomEnemies(room, dt);
 
     if (now - room.game.phase1.lastEmitAt >= GAME_STATE_EMIT_MS) {
       room.game.phase1.lastEmitAt = now;
-      emitGameState(room.id);
+      emitGameState(roomId);
     }
   }
 }, SERVER_TICK_MS);
@@ -552,6 +605,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("room:create", (payload, ack) => {
+    const clientId = normalizeClientId(payload?.clientId, socket.id);
     const room = {
       id: makeRoomId(),
       name: String(payload.name || "Party").slice(0, 36),
@@ -560,13 +614,17 @@ io.on("connection", (socket) => {
       maxPlayers: Math.max(1, Math.min(4, Number(payload.maxPlayers) || 1)),
       started: false,
       createdAt: Date.now(),
+      emptySince: 0,
       game: null,
       players: [
         {
           id: socket.id,
+          clientId,
           name: String(payload.hostName || "Host").slice(0, 20),
           ready: false,
           leader: true,
+          connected: true,
+          disconnectedAt: 0,
           state: null,
         },
       ],
@@ -581,27 +639,85 @@ io.on("connection", (socket) => {
   });
 
   socket.on("room:join", (payload, ack) => {
-    const room = rooms.get(payload.roomId);
+    const room = rooms.get(payload?.roomId);
     if (!room) return ack?.({ ok: false, error: "Room not found" });
-    if (room.started) return ack?.({ ok: false, error: "Room already started" });
-    if (room.code !== String(payload.code || "")) return ack?.({ ok: false, error: "Wrong room code" });
-    if (room.players.length >= room.maxPlayers) return ack?.({ ok: false, error: "Room full" });
 
-    const existing = room.players.find((p) => p.id === socket.id);
-    if (!existing) {
+    const clientId = normalizeClientId(payload?.clientId, socket.id);
+    const existingByClient = room.players.find((p) => p.clientId === clientId);
+
+    if (!existingByClient) {
+      if (room.started) return ack?.({ ok: false, error: "Room already started" });
+      if (room.code !== String(payload.code || "")) return ack?.({ ok: false, error: "Wrong room code" });
+      if (room.players.length >= room.maxPlayers) return ack?.({ ok: false, error: "Room full" });
+
       room.players.push({
         id: socket.id,
+        clientId,
         name: String(payload.name || "Player").slice(0, 20),
         ready: false,
         leader: false,
+        connected: true,
+        disconnectedAt: 0,
         state: null,
       });
+    } else {
+      const oldSocketId = existingByClient.id;
+      existingByClient.id = socket.id;
+      existingByClient.connected = true;
+      existingByClient.disconnectedAt = 0;
+      if (payload?.name) existingByClient.name = String(payload.name).slice(0, 20);
+      if (oldSocketId && oldSocketId !== socket.id) playerRoom.delete(oldSocketId);
     }
 
     playerRoom.set(socket.id, room.id);
+    room.emptySince = 0;
     socket.join(room.id);
     ack?.({ ok: true, room: makeRoomPublic(room) });
     emitRoomUpdate(room.id);
+    if (room.started) {
+      emitQuestSync(room.id);
+      emitGameState(room.id);
+    }
+  });
+
+  socket.on("room:reconnect", (payload, ack) => {
+    const roomId = payload?.roomId;
+    const room = rooms.get(roomId);
+    if (!room) {
+      ack?.({ ok: false, error: "Room not found" });
+      return;
+    }
+
+    const clientId = normalizeClientId(payload?.clientId, socket.id);
+    const player = room.players.find((p) => p.clientId === clientId);
+    if (!player) {
+      ack?.({ ok: false, error: "Player slot not found" });
+      return;
+    }
+
+    const oldSocketId = player.id;
+    player.id = socket.id;
+    player.connected = true;
+    player.disconnectedAt = 0;
+    if (payload?.name) player.name = String(payload.name).slice(0, 20);
+
+    if (oldSocketId && oldSocketId !== socket.id) playerRoom.delete(oldSocketId);
+    playerRoom.set(socket.id, room.id);
+    room.emptySince = 0;
+    socket.join(room.id);
+
+    ack?.({
+      ok: true,
+      room: makeRoomPublic(room),
+      state: room.started && room.game ? makeGamePublic(room) : null,
+      quest: room.started && room.game ? sanitizeQuestSync(room.game.questSync) : null,
+    });
+
+    emitRoomUpdate(room.id);
+    if (room.started) {
+      emitQuestSync(room.id);
+      emitGameState(room.id);
+    }
   });
 
   socket.on("room:ready", (payload) => {
@@ -611,20 +727,23 @@ io.on("connection", (socket) => {
 
     const player = room.players.find((p) => p.id === socket.id);
     if (!player) return;
+    player.connected = true;
+    player.disconnectedAt = 0;
 
     player.ready = !!payload.ready;
     if (payload.name) player.name = String(payload.name).slice(0, 20);
 
     emitRoomUpdate(room.id);
 
-    if (room.players.length > 0 && room.players.every((p) => p.ready)) {
+    const active = connectedPlayers(room);
+    if (active.length > 0 && active.every((p) => p.ready)) {
       room.started = true;
       initRoomGame(room);
       io.to(room.id).emit("game:start", {
         roomId: room.id,
         roomName: room.name,
         difficulty: room.difficulty,
-        playerCount: room.players.length,
+        playerCount: active.length,
       });
       emitRoomUpdate(room.id);
       emitQuestSync(room.id);
@@ -640,6 +759,8 @@ io.on("connection", (socket) => {
     if (!player) return;
 
     player.state = payload.state || null;
+    player.connected = true;
+    player.disconnectedAt = 0;
     socket.to(room.id).emit("player:state", { id: socket.id, state: player.state });
   });
 
@@ -830,14 +951,26 @@ io.on("connection", (socket) => {
     const room = rooms.get(roomId);
     if (!room) return;
 
-    room.players = room.players.filter((p) => p.id !== socket.id);
+    const player = room.players.find((p) => p.id === socket.id);
+    if (!player) return;
 
-    if (room.players.length === 0) {
-      rooms.delete(roomId);
+    if (!room.started) {
+      room.players = room.players.filter((p) => p.id !== socket.id);
+      if (room.players.length === 0) {
+        rooms.delete(roomId);
+        return;
+      }
+      if (!room.players.some((p) => p.leader)) {
+        const firstConnected = room.players.find((p) => p.connected !== false) || room.players[0];
+        if (firstConnected) firstConnected.leader = true;
+      }
+      emitRoomUpdate(roomId);
       return;
     }
 
-    if (!room.players.some((p) => p.leader)) room.players[0].leader = true;
+    player.connected = false;
+    player.disconnectedAt = Date.now();
+    if (connectedPlayers(room).length === 0) room.emptySince = Date.now();
     emitRoomUpdate(roomId);
   });
 });
