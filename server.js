@@ -330,8 +330,14 @@ function createWarlord(room) {
 
 function initRoomGame(room) {
   if (room.game) return;
+  const requiredWaveParts = Math.max(1, connectedPlayers(room).length || 1);
   room.game = {
     questSync: defaultQuestSync(),
+    finalWaveParts: {
+      required: requiredWaveParts,
+      collected: 0,
+      byClient: {},
+    },
     phase1: {
       nextWolfId: 1,
       wolves: [],
@@ -348,6 +354,31 @@ function initRoomGame(room) {
     room.game.phase1.wolves.push(createWolf(room, room.game.phase1.nextWolfId));
     room.game.phase1.nextWolfId += 1;
   }
+}
+
+function ensureFinalWaveParts(room) {
+  if (!room?.game) return { required: 1, collected: 0, byClient: {} };
+  if (!room.game.finalWaveParts || typeof room.game.finalWaveParts !== "object") {
+    room.game.finalWaveParts = {
+      required: Math.max(1, connectedPlayers(room).length || 1),
+      collected: 0,
+      byClient: {},
+    };
+  }
+  const parts = room.game.finalWaveParts;
+  parts.required = Math.max(1, Number(parts.required) || Math.max(1, connectedPlayers(room).length || 1));
+  parts.collected = clamp(Math.floor(Number(parts.collected) || 0), 0, parts.required);
+  if (!parts.byClient || typeof parts.byClient !== "object") parts.byClient = {};
+  return parts;
+}
+
+function buildQuestPayload(room) {
+  const quest = sanitizeQuestSync(room?.game?.questSync || {});
+  const parts = ensureFinalWaveParts(room);
+  quest.finalWavePartsCollected = parts.collected;
+  quest.finalWavePartsRequired = parts.required;
+  if (parts.collected >= parts.required) quest.finalWaveKeyTaken = true;
+  return quest;
 }
 
 function ensurePhase2Spawns(room) {
@@ -381,7 +412,7 @@ function makeGamePublic(room) {
   const leader = roomLeader(room);
   const phase1 = room?.game?.phase1 || {};
   const phase2 = room?.game?.phase2 || {};
-  const questSync = sanitizeQuestSync(room?.game?.questSync || {});
+  const questSync = buildQuestPayload(room);
   const wolves = Array.isArray(phase1.wolves) ? phase1.wolves : [];
   const bandits = Array.isArray(phase2.bandits) ? phase2.bandits : [];
   const direWolf = phase2.direWolf || null;
@@ -424,7 +455,7 @@ function emitQuestSync(roomId) {
   if (!room?.game) return;
   io.to(roomId).emit("quest:sync", {
     roomId,
-    quest: sanitizeQuestSync(room.game.questSync),
+    quest: buildQuestPayload(room),
   });
 }
 
@@ -731,7 +762,7 @@ io.on("connection", (socket) => {
       ok: true,
       room: makeRoomPublic(room),
       state: room.started && room.game ? makeGamePublic(room) : null,
-      quest: room.started && room.game ? sanitizeQuestSync(room.game.questSync) : null,
+      quest: room.started && room.game ? buildQuestPayload(room) : null,
     });
 
     emitRoomUpdate(room.id);
@@ -808,7 +839,7 @@ io.on("connection", (socket) => {
       emitGameState(room.id);
     }
 
-    ack?.({ ok: true, quest: sanitizeQuestSync(room.game.questSync) });
+    ack?.({ ok: true, quest: buildQuestPayload(room) });
   });
 
   socket.on("quest:phase1:update", (payload, ack) => {
@@ -956,7 +987,7 @@ io.on("connection", (socket) => {
         killerId: socket.id,
         x: enemy.x,
         y: enemy.y,
-        quest: sanitizeQuestSync(room.game.questSync),
+        quest: buildQuestPayload(room),
       });
       emitQuestSync(room.id);
     }
@@ -1007,6 +1038,46 @@ io.on("connection", (socket) => {
       fromId: socket.id,
     });
     ack?.({ ok: true });
+  });
+
+  socket.on("wave:part:collect", (payload, ack) => {
+    const roomId = payload?.roomId || playerRoom.get(socket.id);
+    const room = rooms.get(roomId);
+    if (!room || !room.started) {
+      ack?.({ ok: false, error: "Room not active" });
+      return;
+    }
+
+    initRoomGame(room);
+    const player = room.players.find((p) => p.id === socket.id);
+    if (!player) {
+      ack?.({ ok: false, error: "Player not found" });
+      return;
+    }
+
+    const parts = ensureFinalWaveParts(room);
+    const clientId = normalizeClientId(player.clientId, socket.id);
+    const already = parts.byClient[clientId] === true;
+    if (!already) {
+      parts.byClient[clientId] = true;
+      parts.collected = clamp(parts.collected + 1, 0, parts.required);
+    }
+
+    const complete = parts.collected >= parts.required;
+    if (complete) room.game.questSync.finalWaveKeyTaken = true;
+
+    const status = {
+      roomId: room.id,
+      collected: parts.collected,
+      required: parts.required,
+      complete,
+      already,
+    };
+
+    io.to(room.id).emit("wave:part:update", status);
+    emitQuestSync(room.id);
+    emitGameState(room.id);
+    ack?.({ ok: true, ...status });
   });
 
   socket.on("disconnect", () => {
